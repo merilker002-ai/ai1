@@ -55,49 +55,28 @@ def load_and_analyze_data(uploaded_file, zone_file):
     
     # Zone veri dosyasını oku ve işle
     zone_analizi = None
-    kullanici_zone_verileri = {}
     
     if zone_file is not None:
         try:
-            zone_excel_df = pd.read_excel(zone_file)
-            st.success(f"✅ Zone veri dosyası başarıyla yüklendi: {len(zone_excel_df)} kayıt")
+            # Zone dosyasını oku
+            zone_df = pd.read_excel(zone_file)
+            st.success(f"✅ Zone veri dosyası başarıyla yüklendi: {len(zone_df)} kayıt")
             
-            # Sütun isimlerini temizle
-            zone_excel_df.columns = zone_excel_df.columns.str.strip().str.replace('\n', ' ', regex=False)
+            # Sütun isimlerini temizle ve unique yap
+            zone_df.columns = [f"col_{i}" for i in range(len(zone_df.columns))]
             
-            # Zone verilerini işle - daha esnek sütun eşleştirme
-            column_mapping = {}
-            for col in zone_excel_df.columns:
-                col_clean = str(col).upper().replace(' ', '')
-                if 'KARNE' in col_clean or 'ZONE' in col_clean:
-                    column_mapping[col] = 'ZONE_ADI'
-                elif 'VERİLEN' in col_clean or 'GİREN' in col_clean or 'GIREN' in col_clean or 'SUMIKTARI' in col_clean:
-                    column_mapping[col] = 'GIRN_SU_M3'
-                elif 'TAHAKKUK' in col_clean:
-                    column_mapping[col] = 'TAHAKKUK_M3'
-            
-            # Sütunları yeniden adlandır
-            if column_mapping:
-                zone_excel_df = zone_excel_df.rename(columns=column_mapping)
-            
-            # Gerekli sütunları kontrol et
-            required_cols = ['ZONE_ADI', 'GIRN_SU_M3', 'TAHAKKUK_M3']
-            available_cols = [col for col in required_cols if col in zone_excel_df.columns]
-            
-            if len(available_cols) >= 2:  # En az Zone adı ve bir sayısal sütun
-                zone_analizi = zone_excel_df[available_cols].copy()
+            # Manuel olarak sütunları eşleştir (dosya yapısına göre)
+            # Genellikle: 0: Zone adı, 1: Giren su, 2: Tahakkuk
+            if len(zone_df.columns) >= 3:
+                zone_analizi = pd.DataFrame()
+                zone_analizi['ZONE_ADI'] = zone_df.iloc[:, 0]
+                zone_analizi['GIRN_SU_M3'] = pd.to_numeric(zone_df.iloc[:, 1], errors='coerce')
+                zone_analizi['TAHAKKUK_M3'] = pd.to_numeric(zone_df.iloc[:, 2], errors='coerce')
                 
-                # NaN satırları temizle
+                # NaN ve TOPLAM satırlarını temizle
                 zone_analizi = zone_analizi.dropna(subset=['ZONE_ADI'])
                 zone_analizi = zone_analizi[~zone_analizi['ZONE_ADI'].astype(str).str.contains('TOPLAM', na=False)]
-                
-                # Sayısal dönüşüm
-                for col in ['GIRN_SU_M3', 'TAHAKKUK_M3']:
-                    if col in zone_analizi.columns:
-                        zone_analizi[col] = pd.to_numeric(zone_analizi[col], errors='coerce')
-                
-                # NaN değerleri temizle
-                zone_analizi = zone_analizi.dropna(subset=[col for col in ['GIRN_SU_M3', 'TAHAKKUK_M3'] if col in zone_analizi.columns])
+                zone_analizi = zone_analizi.dropna(subset=['GIRN_SU_M3', 'TAHAKKUK_M3'])
                 
                 st.success(f"✅ Zone verileri işlendi: {len(zone_analizi)} kayıt")
                 
@@ -197,79 +176,7 @@ def load_and_analyze_data(uploaded_file, zone_file):
         davranis_df = pd.DataFrame(davranis_sonuclari)
         son_okumalar = son_okumalar.merge(davranis_df, on='TESISAT_NO', how='left')
 
-    return df, son_okumalar, zone_analizi, kullanici_zone_verileri
-
-# ======================================================================
-# 🤖 MAKİNE ÖĞRENMESİ KAÇAK TAHMİN MODÜLÜ
-# ======================================================================
-
-class LeakagePredictor:
-    def __init__(self):
-        self.models = {}
-        self.scalers = {}
-        self.anomaly_detectors = {}
-        self.feature_importance = {}
-    
-    def train_model(self, df, feature_columns, target_column='KAÇAK_RİSK_SKORU'):
-        """Model eğit"""
-        try:
-            # Eksik verileri temizle
-            df_clean = df.dropna(subset=feature_columns + [target_column])
-            
-            if len(df_clean) < 10:
-                st.error("Eğitim için yeterli veri yok")
-                return None
-            
-            # Özellikler ve hedef
-            X = df_clean[feature_columns]
-            y = df_clean[target_column]
-            
-            # Ölçeklendirme
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            
-            # Veriyi bölme
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_scaled, y, test_size=0.2, random_state=42
-            )
-            
-            # Model eğitme
-            model = RandomForestRegressor(n_estimators=100, random_state=42)
-            model.fit(X_train, y_train)
-            
-            # Tahminler
-            y_pred = model.predict(X_test)
-            
-            # Anomali tespiti
-            anomaly_detector = IsolationForest(contamination=0.1, random_state=42)
-            anomalies = anomaly_detector.fit_predict(X_scaled)
-            
-            # Feature importance
-            feature_imp = pd.DataFrame({
-                'feature': feature_columns,
-                'importance': model.feature_importances_
-            }).sort_values('importance', ascending=False)
-            
-            # Sonuçları sakla
-            self.scalers['main'] = scaler
-            self.models['main'] = model
-            self.anomaly_detectors['main'] = anomaly_detector
-            self.feature_importance['main'] = feature_imp
-            
-            return {
-                'model': model,
-                'scaler': scaler,
-                'anomaly_detector': anomaly_detector,
-                'X_test': X_test,
-                'y_test': y_test,
-                'y_pred': y_pred,
-                'anomalies': anomalies,
-                'feature_importance': feature_imp
-            }
-            
-        except Exception as e:
-            st.error(f"Model eğitilirken hata: {str(e)}")
-            return None
+    return df, son_okumalar, zone_analizi, {}
 
 # ======================================================================
 # 📥 RAPOR İNDİRME FONKSİYONLARI
@@ -296,10 +203,6 @@ def create_comprehensive_report(son_okumalar, zone_analizi, ml_results=None):
         # 4. Zone Analizi
         if zone_analizi is not None:
             zone_analizi.to_excel(writer, sheet_name='Zone_Analizi', index=False)
-        
-        # 5. Makine Öğrenmesi Sonuçları
-        if ml_results is not None:
-            ml_results['feature_importance'].to_excel(writer, sheet_name='ML_Özellik_Önemliliği', index=False)
     
     return output.getvalue()
 
@@ -326,11 +229,10 @@ def calculate_losses(df_zone, real_loss_percentage):
     """Verilen yüzdeye göre kayıp hacimlerini hesaplar."""
     df_calc = df_zone.copy()
     
-    # Toplam Kaçak Hesaplama (eğer yoksa)
-    if 'TOPLAM_KACAK_M3' not in df_calc.columns:
-        if 'GIRN_SU_M3' in df_calc.columns and 'TAHAKKUK_M3' in df_calc.columns:
-            df_calc['TOPLAM_KACAK_M3'] = df_calc['GIRN_SU_M3'] - df_calc['TAHAKKUK_M3']
-            df_calc['TOPLAM_KACAK_ORANI'] = (df_calc['TOPLAM_KACAK_M3'] / df_calc['GIRN_SU_M3']) * 100
+    # Toplam Kaçak Hesaplama
+    if 'GIRN_SU_M3' in df_calc.columns and 'TAHAKKUK_M3' in df_calc.columns:
+        df_calc['TOPLAM_KACAK_M3'] = df_calc['GIRN_SU_M3'] - df_calc['TAHAKKUK_M3']
+        df_calc['TOPLAM_KACAK_ORANI'] = (df_calc['TOPLAM_KACAK_M3'] / df_calc['GIRN_SU_M3']) * 100
     
     # Gerçek ve Görünür Kayıp Hesaplamaları
     df_calc['TAHMINI_GERCEK_KAYIP_YUZDESI'] = real_loss_percentage * 100
@@ -369,7 +271,6 @@ zone_file = st.sidebar.file_uploader(
 )
 
 # Demo butonu
-demo_data_created = False
 if st.sidebar.button("🎮 Demo Modunda Çalıştır"):
     # Demo verisi oluştur
     st.info("Demo modu aktif! Örnek verilerle çalışılıyor...")
@@ -414,30 +315,30 @@ if st.sidebar.button("🎮 Demo Modunda Çalıştır"):
         'TAHAKKUK_M3': [7654, 7375, 7010, 1813, 2134]
     })
     
-    demo_data_created = True
     st.success("✅ Demo verisi başarıyla oluşturuldu!")
     st.session_state.demo_data = True
-    st.session_state.df_zone = zone_analizi
+    st.session_state.son_okumalar = son_okumalar
+    st.session_state.zone_analizi = zone_analizi
 
 elif uploaded_file is not None and zone_file is not None:
     # Gerçek dosya yüklendi
-    df, son_okumalar, zone_analizi, kullanici_zone_verileri = load_and_analyze_data(uploaded_file, zone_file)
-    demo_data_created = False
+    df, son_okumalar, zone_analizi, _ = load_and_analyze_data(uploaded_file, zone_file)
     
-    if zone_analizi is not None:
-        st.session_state.df_zone = zone_analizi
+    if son_okumalar is not None and zone_analizi is not None:
         st.session_state.demo_data = False
+        st.session_state.son_okumalar = son_okumalar
+        st.session_state.zone_analizi = zone_analizi
 else:
-    if not demo_data_created and 'demo_data' not in st.session_state:
+    if 'demo_data' not in st.session_state:
         st.warning("⚠️ Lütfen iki Excel dosyasını da yükleyin veya Demo modunu kullanın")
     st.stop()
 
 # Rapor İndirme Butonları
 st.sidebar.header("📥 Rapor İndirme")
 
-if 'son_okumalar' in locals() and son_okumalar is not None:
+if 'son_okumalar' in st.session_state and st.session_state.son_okumalar is not None:
     # Kapsamlı rapor
-    comprehensive_report = create_comprehensive_report(son_okumalar, zone_analizi)
+    comprehensive_report = create_comprehensive_report(st.session_state.son_okumalar, st.session_state.zone_analizi)
     st.sidebar.download_button(
         label="📊 Tüm Raporu İndir (Excel)",
         data=comprehensive_report,
@@ -446,7 +347,9 @@ if 'son_okumalar' in locals() and son_okumalar is not None:
     )
 
 # Genel Metrikler
-if 'son_okumalar' in locals() and son_okumalar is not None:
+if 'son_okumalar' in st.session_state and st.session_state.son_okumalar is not None:
+    son_okumalar = st.session_state.son_okumalar
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -475,7 +378,9 @@ if 'son_okumalar' in locals() and son_okumalar is not None:
 tab1, tab2, tab3, tab4 = st.tabs(["📈 Genel Görünüm", "🗺️ Zone Analizi", "🔍 Detaylı Analiz", "📊 Kayıp Kaçak Simülasyonu"])
 
 with tab1:
-    if 'son_okumalar' in locals() and son_okumalar is not None:
+    if 'son_okumalar' in st.session_state and st.session_state.son_okumalar is not None:
+        son_okumalar = st.session_state.son_okumalar
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -497,18 +402,27 @@ with tab1:
                 st.plotly_chart(fig2, use_container_width=True)
 
 with tab2:
-    if 'zone_analizi' in locals() and zone_analizi is not None:
+    if 'zone_analizi' in st.session_state and st.session_state.zone_analizi is not None:
+        zone_analizi = st.session_state.zone_analizi
+        
+        # Zone verilerini temizle ve hazırla
+        display_zone = zone_analizi.copy()
+        if 'GIRN_SU_M3' in display_zone.columns and 'TAHAKKUK_M3' in display_zone.columns:
+            display_zone['TOPLAM_KACAK_M3'] = display_zone['GIRN_SU_M3'] - display_zone['TAHAKKUK_M3']
+            display_zone['KAYIP_ORANI'] = (display_zone['TOPLAM_KACAK_M3'] / display_zone['GIRN_SU_M3']) * 100
+            display_zone['KAYIP_ORANI'] = display_zone['KAYIP_ORANI'].round(2)
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            if 'GIRN_SU_M3' in zone_analizi.columns and 'ZONE_ADI' in zone_analizi.columns:
-                fig4 = px.pie(zone_analizi, values='GIRN_SU_M3', names='ZONE_ADI',
+            if 'GIRN_SU_M3' in display_zone.columns and 'ZONE_ADI' in display_zone.columns:
+                fig4 = px.pie(display_zone, values='GIRN_SU_M3', names='ZONE_ADI',
                             title='Zone Bazlı Su Giriş Dağılımı')
                 st.plotly_chart(fig4, use_container_width=True)
         
         with col2:
-            if 'TAHAKKUK_M3' in zone_analizi.columns and 'ZONE_ADI' in zone_analizi.columns:
-                fig5 = px.bar(zone_analizi, x='ZONE_ADI', y='TAHAKKUK_M3',
+            if 'TAHAKKUK_M3' in display_zone.columns and 'ZONE_ADI' in display_zone.columns:
+                fig5 = px.bar(display_zone, x='ZONE_ADI', y='TAHAKKUK_M3',
                             title='Zone Bazlı Tahakkuk Miktarı',
                             labels={'ZONE_ADI': 'Zone', 'TAHAKKUK_M3': 'Tahakkuk (m³)'},
                             color_discrete_sequence=['#E74C3C'])
@@ -516,18 +430,14 @@ with tab2:
         
         # Zone Karşılaştırma Tablosu
         st.subheader("Zone Karşılaştırma Tablosu")
-        display_zone = zone_analizi.copy()
-        if 'GIRN_SU_M3' in display_zone.columns and 'TAHAKKUK_M3' in display_zone.columns:
-            display_zone['TOPLAM_KACAK_M3'] = display_zone['GIRN_SU_M3'] - display_zone['TAHAKKUK_M3']
-            display_zone['KAYIP_ORANI'] = (display_zone['TOPLAM_KACAK_M3'] / display_zone['GIRN_SU_M3']) * 100
-            display_zone['KAYIP_ORANI'] = display_zone['KAYIP_ORANI'].round(2)
-        
         st.dataframe(display_zone, use_container_width=True)
     else:
         st.info("Zone verisi bulunamadı")
 
 with tab3:
-    if 'son_okumalar' in locals() and son_okumalar is not None:
+    if 'son_okumalar' in st.session_state and st.session_state.son_okumalar is not None:
+        son_okumalar = st.session_state.son_okumalar
+        
         st.subheader("Tesisat Tablosu")
         
         # Filtreleme
@@ -555,8 +465,8 @@ with tab4:
     st.markdown("---")
     
     # Mevcut verileri kullan
-    if 'df_zone' in st.session_state:
-        df_zone = st.session_state.df_zone
+    if 'zone_analizi' in st.session_state and st.session_state.zone_analizi is not None:
+        df_zone = st.session_state.zone_analizi.copy()
         
         st.success(f"✅ Zone verileri simülasyon için hazır: {len(df_zone)} kayıt")
         
@@ -632,7 +542,7 @@ with tab4:
         display_df = df_results[display_cols].copy()
         display_df.columns = ['Zone Adı', 'Giren Su (m³)', 'Toplam Kayıp (m³)', 'Toplam Kayıp (%)', 
                             'Tahmini Boru Kaybı (m³)', 'Tahmini Sayaç/İdari Kayıp (m³)']
-        display_df['Toplam Kayıp (%)'] = display_df['Toplam Kayıp (%)'].round(2).astype(str) + '%'
+        display_df['Toplam Kayıp (%)'] = display_df['Toplam Kayıp (%)'].apply(lambda x: f"{round(x, 2)}%" if pd.notna(x) else 'NaN')
 
         st.dataframe(display_df, use_container_width=True)
 
