@@ -236,7 +236,7 @@ class LeakagePredictor:
             model = RandomForestRegressor(n_estimators=100, random_state=42)
             model.fit(X_train, y_train)
             
-            # Tahminler
+            # Tahminers
             y_pred = model.predict(X_test)
             
             # Anomali tespiti
@@ -307,13 +307,43 @@ def create_comprehensive_report(son_okumalar, zone_analizi, ml_results=None):
 # ======================================================================
 
 @st.cache_data
-def load_simulation_data(uploaded_file, header_row=8):
-    """Yüklenen dosyayı okur (CSV veya Excel)."""
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file, skiprows=header_row-1)
-    else:
-        df = pd.read_excel(uploaded_file, header=header_row)
-    return df
+def load_simulation_data(uploaded_file):
+    """Yüklenen dosyayı okur ve uygun başlık satırını bulur"""
+    try:
+        # Önce dosyayı oku ve içeriğine bak
+        if uploaded_file.name.endswith('.csv'):
+            df_temp = pd.read_csv(uploaded_file)
+        else:
+            df_temp = pd.read_excel(uploaded_file)
+        
+        # Uygun başlık satırını bul
+        header_row = find_header_row(df_temp)
+        
+        # Doğru başlık satırı ile tekrar oku
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, skiprows=header_row)
+        else:
+            df = pd.read_excel(uploaded_file, skiprows=header_row)
+            
+        return df
+        
+    except Exception as e:
+        st.error(f"Dosya okuma hatası: {e}")
+        # Son çare: header olmadan oku
+        if uploaded_file.name.endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        else:
+            return pd.read_excel(uploaded_file)
+
+def find_header_row(df_temp):
+    """DataFrame'de uygun başlık satırını bul"""
+    for i in range(min(10, len(df_temp))):  # İlk 10 satırı kontrol et
+        row = df_temp.iloc[i]
+        # Eğer satırda "KARNE", "VERİLEN", "TAHAKKUK" gibi anahtar kelimeler varsa
+        row_str = ' '.join(str(cell) for cell in row.values)
+        if any(keyword in row_str.upper() for keyword in ['KARNE', 'VERİLEN', 'TAHAKKUK', 'SU', 'M3']):
+            return i
+    return 0  # Hiç uygun başlık bulunamazsa 0. satırı kullan
 
 def calculate_real_loss_percentage(boru_yasi, malzeme_kalitesi, sicaklik_stresi, basin_profili):
     """Kullanıcının slider girdilerine göre Gerçek Kayıp Yüzdesini hesaplar (55% - 75% aralığında)."""
@@ -342,7 +372,8 @@ def calculate_losses(df, real_loss_percentage):
 
     cols_to_round = ['GIRN_SU_M3', 'TAHAKKUK_M3', 'TOPLAM_KACAK_M3', 'TAHMINI_BORU_KAYBI_M3', 'TAHMINI_SAYAC_KAYBI_M3']
     for col in cols_to_round:
-        df_calc[col] = df_calc[col].round(0).astype(int)
+        if col in df_calc.columns:
+            df_calc[col] = df_calc[col].round(0).astype(int)
 
     return df_calc
 
@@ -586,111 +617,146 @@ with tab4:
 
     if uploaded_file_zone is not None:
         try:
-            # Veriyi yükle ve sütun adlarını sabitle
-            df_zone_raw = load_simulation_data(uploaded_file_zone, header_row=8)
+            # Veriyi yükle
+            df_zone_raw = load_simulation_data(uploaded_file_zone)
             
             # Sütunları temizle ve yeniden adlandır
             df_zone_raw.columns = df_zone_raw.columns.str.strip().str.replace('\n', ' ', regex=False)
             
+            # Sütun isimlerini bul ve eşleştir
+            column_mapping = {}
+            for col in df_zone_raw.columns:
+                col_upper = col.upper()
+                if 'KARNE' in col_upper:
+                    column_mapping[col] = 'ZONE_ADI'
+                elif 'VERİLEN' in col_upper or 'GİREN' in col_upper or 'SU' in col_upper:
+                    column_mapping[col] = 'GIRN_SU_M3'
+                elif 'TAHAKKUK' in col_upper:
+                    column_mapping[col] = 'TAHAKKUK_M3'
+            
+            # Sütunları yeniden adlandır
+            df_zone = df_zone_raw.rename(columns=column_mapping)
+            
             # Gerekli sütunları seç
-            df_zone = df_zone_raw[['KARNE NO VE ADI', 'VERİLEN SU MİKTARI M3', 'TAHAKKUK M3']].copy()
-            df_zone.columns = ['ZONE_ADI', 'GIRN_SU_M3', 'TAHAKKUK_M3']
+            required_cols = ['ZONE_ADI', 'GIRN_SU_M3', 'TAHAKKUK_M3']
+            missing_cols = [col for col in required_cols if col not in df_zone.columns]
             
-            # NaN satırları temizle ve sayısal dönüşüm yap
-            df_zone.dropna(subset=['ZONE_ADI'], inplace=True)
-            df_zone = df_zone[~df_zone['ZONE_ADI'].str.contains('TOPLAM', na=False)] # TOPLAM satırını çıkar
-            
-            # Sayısal dönüşüm (virgül yerine nokta kullanılması gerekebilir)
-            df_zone['GIRN_SU_M3'] = df_zone['GIRN_SU_M3'].astype(str).str.replace(',', '.', regex=False).astype(float)
-            df_zone['TAHAKKUK_M3'] = df_zone['TAHAKKUK_M3'].astype(str).str.replace(',', '.', regex=False).astype(float)
-            
-            # Toplam Kaçak Hesaplama
-            df_zone['TOPLAM_KACAK_M3'] = df_zone['GIRN_SU_M3'] - df_zone['TAHAKKUK_M3']
-            df_zone['TOPLAM_KACAK_ORANI'] = (df_zone['TOPLAM_KACAK_M3'] / df_zone['GIRN_SU_M3']) * 100
+            if missing_cols:
+                st.error(f"Gerekli sütunlar bulunamadı: {missing_cols}")
+                st.info("Mevcut sütunlar:")
+                st.write(df_zone_raw.columns.tolist())
+            else:
+                # NaN satırları temizle ve sayısal dönüşüm yap
+                df_zone = df_zone[required_cols].copy()
+                df_zone.dropna(subset=['ZONE_ADI'], inplace=True)
+                df_zone = df_zone[~df_zone['ZONE_ADI'].astype(str).str.contains('TOPLAM', na=False)]
+                
+                # Sayısal dönüşüm
+                df_zone['GIRN_SU_M3'] = pd.to_numeric(df_zone['GIRN_SU_M3'], errors='coerce')
+                df_zone['TAHAKKUK_M3'] = pd.to_numeric(df_zone['TAHAKKUK_M3'], errors='coerce')
+                
+                # NaN değerleri temizle
+                df_zone = df_zone.dropna(subset=['GIRN_SU_M3', 'TAHAKKUK_M3'])
+                
+                # Toplam Kaçak Hesaplama
+                df_zone['TOPLAM_KACAK_M3'] = df_zone['GIRN_SU_M3'] - df_zone['TAHAKKUK_M3']
+                df_zone['TOPLAM_KACAK_ORANI'] = (df_zone['TOPLAM_KACAK_M3'] / df_zone['GIRN_SU_M3']) * 100
 
-            st.success("Veriler başarıyla yüklendi ve işlendi. Şimdi risk parametrelerini ayarlayabilirsiniz.")
-            
-            # Sidebar Risk Parametreleri
-            st.sidebar.header("🔧 Kayıp Kaçak Simülasyonu - Risk Parametreleri")
-            st.sidebar.markdown("**Talimat:** Zone'unuzun genel durumunu yansıtan risk puanlarını (1: Düşük Risk, 5: Yüksek Risk) seçin.")
-            
-            boru_malzemesi_options = {
-                "Polietilen (PE/HDPE)": 1,
-                "Beton/Betonarme (Çimento)": 3,
-                "Sfero Döküm Demir": 3,
-                "Gri Döküm (Font) Demir": 4,
-                "Asbestli Çimento (AC)": 5
-            }
-            
-            st.sidebar.subheader("I. Altyapı Parametreleri")
+                st.success(f"✅ Veriler başarıyla yüklendi: {len(df_zone)} kayıt")
+                
+                # RİSK PARAMETRELERİ - ANA SAYFADA GÖSTER
+                st.header("2️⃣ Risk Parametrelerini Ayarlayın")
+                st.markdown("**Talimat:** Zone'unuzun genel durumunu yansıtan risk puanlarını (1: Düşük Risk, 5: Yüksek Risk) seçin.")
+                
+                boru_malzemesi_options = {
+                    "Polietilen (PE/HDPE)": 1,
+                    "Beton/Betonarme (Çimento)": 3,
+                    "Sfero Döküm Demir": 3,
+                    "Gri Döküm (Font) Demir": 4,
+                    "Asbestli Çimento (AC)": 5
+                }
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("I. Altyapı Parametreleri")
+                    boru_yasi = st.slider("1. Boru Yaşı Endeksi", min_value=1, max_value=5, value=5, step=1, 
+                                        help="1: Yeni (0-5 yıl), 5: Eski (20+ yıl)")
+                    
+                    malzeme_secimi = st.selectbox("2. Baskın Boru Malzemesi Kalitesi", 
+                                                options=list(boru_malzemesi_options.keys()), index=4,
+                                                help="Malzeme tipine göre risk puanı")
+                    malzeme_kalitesi = boru_malzemesi_options[malzeme_secimi]
 
-            boru_yasi = st.sidebar.slider("1. Boru Yaşı Endeksi", min_value=1, max_value=5, value=5, step=1, key="boru_yasi")
-            
-            malzeme_secimi = st.sidebar.selectbox("2. Baskın Boru Malzemesi Kalitesi", 
-                                                options=list(boru_malzemesi_options.keys()), index=4, key="malzeme_secimi")
-            malzeme_kalitesi = boru_malzemesi_options[malzeme_secimi]
+                with col2:
+                    st.subheader("II. Çevresel ve Operasyonel Parametreler")
+                    sicaklik_stresi = st.slider("3. Zemin Hareketi/Sıcaklık Stresi", min_value=1, max_value=5, value=4, step=1,
+                                              help="1: Stabil zemin, 5: Yüksek hareketli zemin")
+                    
+                    basin_profili = st.sidebar.slider("4. Basınç Profili", min_value=1, max_value=5, value=5, step=1,
+                                                    help="1: Düşük basınç, 5: Yüksek/değişken basınç")
 
-            st.sidebar.subheader("II. Çevresel ve Operasyonel Parametrelers")
+                # Hesaplama ve Sonuçlar
+                real_loss_percent_decimal = calculate_real_loss_percentage(boru_yasi, malzeme_kalitesi, sicaklik_stresi, basin_profili)
+                real_loss_percent_display = round(real_loss_percent_decimal * 100, 1)
 
-            sicaklik_stresi = st.sidebar.slider("3. Zemin Hareketi/Sıcaklık Stresi", min_value=1, max_value=5, value=4, step=1, key="sicaklik_stresi")
-            
-            basin_profili = st.sidebar.slider("4. Basınç Profili", min_value=1, max_value=5, value=5, step=1, key="basin_profili")
+                df_results = calculate_losses(df_zone, real_loss_percent_decimal)
 
-            # Hesaplama ve Sonuçlar
-            real_loss_percent_decimal = calculate_real_loss_percentage(boru_yasi, malzeme_kalitesi, sicaklik_stresi, basin_profili)
-            real_loss_percent_display = round(real_loss_percent_decimal * 100, 1)
+                st.header("3️⃣ Simülasyon Sonuçları ve Kayıp Dağılımı")
 
-            df_results = calculate_losses(df_zone, real_loss_percent_decimal)
+                col1, col2, col3 = st.columns(3)
 
-            st.header("3️⃣ Simülasyon Sonuçları ve Kayıp Dağılımı")
+                with col1:
+                    st.metric(
+                        label="Toplam Kayıp Risk Puanı (Max 20)",
+                        value=f"{boru_yasi + malzeme_kalitesi + sicaklik_stresi + basin_profili}",
+                        help="4 ayrı parametrenin puanlarının toplamıdır."
+                    )
 
-            col1, col2, col3 = st.columns(3)
+                with col2:
+                    st.metric(
+                        label="Tahmini Boru Kaybı (Gerçek Kayıp) Oranı",
+                        value=f"%{real_loss_percent_display}",
+                        delta=f"Kalan %{100 - real_loss_percent_display:.1f} Sayaç/İdari Kayıptır."
+                    )
 
-            with col1:
-                st.metric(
-                    label="Toplam Kayıp Risk Puanı (Max 20)",
-                    value=f"{boru_yasi + malzeme_kalitesi + sicaklik_stresi + basin_profili}",
-                    help="4 ayrı parametrenin puanlarının toplamıdır."
-                )
+                with col3:
+                    total_real_loss = df_results['TAHMINI_BORU_KAYBI_M3'].sum()
+                    total_apparent_loss = df_results['TAHMINI_SAYAC_KAYBI_M3'].sum()
+                    st.metric(
+                        label="Şebekeden Kaybolan Su Hacmi Tahmini",
+                        value=f"{total_real_loss:,} m³",
+                        delta="Boru Kaçağı (Fiziksel)"
+                    )
 
-            with col2:
-                st.metric(
-                    label="Tahmini Boru Kaybı (Gerçek Kayıp) Oranı",
-                    value=f"%{real_loss_percent_display}",
-                    delta=f"Kalan %{100 - real_loss_percent_display:.1f} Sayaç/İdari Kayıptır."
-                )
+                st.subheader("Bölge (Zone) Bazında Tahmini Kayıp Hacmi ($m^3$)")
+                
+                display_cols = ['ZONE_ADI', 'GIRN_SU_M3', 'TOPLAM_KACAK_M3', 'TOPLAM_KACAK_ORANI',
+                                'TAHMINI_BORU_KAYBI_M3', 'TAHMINI_SAYAC_KAYBI_M3']
+                display_df = df_results[display_cols]
+                display_df.columns = ['Zone Adı', 'Giren Su (m³)', 'Toplam Kayıp (m³)', 'Toplam Kayıp (%)', 
+                                    'Tahmini Boru Kaybı (m³)', 'Tahmini Sayaç/İdari Kayıp (m³)']
+                display_df['Toplam Kayıp (%)'] = display_df['Toplam Kayıp (%)'].round(2).astype(str) + '%'
 
-            with col3:
-                total_real_loss = df_results['TAHMINI_BORU_KAYBI_M3'].sum()
-                total_apparent_loss = df_results['TAHMINI_SAYAC_KAYBI_M3'].sum()
-                st.metric(
-                    label="Şebekeden Kaybolan Su Hacmi Tahmini",
-                    value=f"{total_real_loss:,} m³",
-                    delta="Boru Kaçağı (Fiziksel)"
-                )
+                st.dataframe(display_df, use_container_width=True)
 
-            st.subheader("Bölge (Zone) Bazında Tahmini Kayıp Hacmi ($m^3$)")
-            
-            display_cols = ['ZONE_ADI', 'GIRN_SU_M3', 'TOPLAM_KACAK_M3', 'TOPLAM_KACAK_ORANI',
-                            'TAHMINI_BORU_KAYBI_M3', 'TAHMINI_SAYAC_KAYBI_M3']
-            display_df = df_results[display_cols]
-            display_df.columns = ['Zone Adı', 'Giren Su (m³)', 'Toplam Kayıp (m³)', 'Toplam Kayıp (%)', 
-                                'Tahmini Boru Kaybı (m³)', 'Tahmini Sayaç/İdari Kayıp (m³)']
-            display_df['Toplam Kayıp (%)'] = display_df['Toplam Kayıp (%)'].round(2).astype(str) + '%'
+                st.markdown("---")
+                st.subheader("💡 Önceliklendirme ve Eylem Vurgusu")
+                st.markdown(f"""
+                Bu simülasyon sonuçlarına göre (Gerçek Kayıp Payı: **%{real_loss_percent_display}**):
 
-            st.dataframe(display_df, use_container_width=True)
-
-            st.markdown("---")
-            st.subheader("💡 Önceliklendirme ve Eylem Vurgusu")
-            st.markdown(f"""
-            Bu simülasyon sonuçlarına göre (Gerçek Kayıp Payı: **%{real_loss_percent_display}**):
-
-            * **Acil Fiziki Müdahale:** Toplam kayıp hacminin **{total_real_loss:,} $m^3$'ü** doğrudan boru sisteminden kaynaklanmaktadır. Bu durum, belirlenen risklere göre **Şebeke Rehabilitasyonu** ve **Basınç Yönetimi** projelerinin aciliyetini doğrulamaktadır.
-            * **Kayıt ve İdari Müdahale:** **{total_apparent_loss:,} $m^3$'lük** kayıp hacmi ise sayaç okuma hataları, arızalı sayaçlar ve yasadışı kullanımla mücadeleyi (Görünür Kayıp) önceliklendirmeyi gerektirmektedir.
-            """)
+                * **Acil Fiziki Müdahale:** Toplam kayıp hacminin **{total_real_loss:,} $m^3$'ü** doğrudan boru sisteminden kaynaklanmaktadır. Bu durum, belirlenen risklere göre **Şebeke Rehabilitasyonu** ve **Basınç Yönetimi** projelerinin aciliyetini doğrulamaktadır.
+                * **Kayıt ve İdari Müdahale:** **{total_apparent_loss:,} $m^3$'lük** kayıp hacmi ise sayaç okuma hataları, arızalı sayaçlar ve yasadışı kullanımla mücadeleyi (Görünür Kayıp) önceliklendirmeyi gerektirmektedir.
+                """)
 
         except Exception as e:
             st.error(f"Veri işlenirken bir hata oluştu. Lütfen yüklediğiniz dosyanın formatını ve sütun adlarını kontrol edin. Hata: {e}")
+            st.info("""
+            **Dosya Formatı Beklentisi:**
+            - Dosyanızda 'KARNE NO VE ADI', 'VERİLEN SU MİKTARI M3', 'TAHAKKUK M3' sütunları olmalı
+            - Veya benzer isimli sütunlar (Örn: 'Zone', 'Giren Su', 'Tahakkuk')
+            - Sayısal değerler doğru formatta olmalı
+            """)
 
     else:
         st.info("Lütfen analize başlamak için 'YAVUZELİ MERKEZ EKİM.xlsx' dosyasını yukarıdaki yükleme kutusuna sürükleyip bırakın.")
